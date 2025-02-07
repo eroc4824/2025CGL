@@ -32,4 +32,12 @@ you can copy the entire thing from github and then reformat it in excel:
   paste special so it doesn't try to unformat it
 
 transfering the samplesheet file: scp eroc4824@fiji.colorado.edu:/scratch/Shares/rinnclass/MASTER_CLASS/STUDENTS/eroc4824/MASTER_CLASS/lessons/04_RNAseq_Dox/01_Mouse_dox_wt/dox_long/samplesheet.csv /Users/eroc4824/Downloads/
-  
+
+# next, we need to make sure the shell script is executable --> chmod u+x run.sh
+# now, we're ready to run --> sbatch run.sh
+# make sure you know how to cancel a job BEFORE you run --> scancel -u eroc4824 
+    this will cancel all your jobs you have running
+
+this is a useful command for checking the status of your running job:
+# tail -f nextflow.out --> this basically lets you see live updates as your job runs
+squeue -u eroc4824 is an alternative way to check the status of your job, just doesn't show you much
