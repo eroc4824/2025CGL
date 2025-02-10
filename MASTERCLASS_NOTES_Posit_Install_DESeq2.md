@@ -1,8 +1,8 @@
-# Installing DESeq2 via Posit Workbench for R 4.3.1:
+# Installing DESeq2 and Tidyverse for R 4.3.1:
 
 ## Logging into posit workbench to access/use R: 
-### this is a tool for visualizing and interpreting RNA-seq data
-### currently using version R 4.3.1
+This is a tool for visualizing and interpreting RNA-seq data
+Currently using version R 4.3.1
 https://fiji-viz-3.int.colorado.edu/auth-sign-in?appUri=%2F
 use your RC login info
 TODAY, our goal is just to install all the DESeq2 packages we'll need to processing/interpreting our RNA-seq data that we ran using the nextflow pipeline
@@ -10,8 +10,9 @@ TODAY, our goal is just to install all the DESeq2 packages we'll need to process
 
 ### NOTE - MAKE SURE YOU SUSPEND OR QUIT YOUR POSIT SESSION WHEN YOU ARE DONE - OTHERWISE IT WILL KEEP THOSE RESOURCES IN USE AND NO ONE ELSE CAN USE THEM
 
-
-### Create new session
+### Below are instructions for installing DESeq2 and tidyverse on fiji-viz-3!
+The first two commands will need to be carried out on Fiji before launching your fiji-viz-3 RStudio session.
+Create new session in posit R studio:
 Session name: DESeq2_Install
 Cluster: slurm
 Resource profile: small (4 CPU)
