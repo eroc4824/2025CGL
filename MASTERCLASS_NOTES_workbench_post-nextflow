@@ -1,4 +1,5 @@
-### Notes from our previous nextflow pipeline run through fiji/slurm on Friday:
-- additional parameter to add to our config file --> "queue Size = " so that you can specify the number of jobs it should make
-- "executor = slurm" --> this is what we had in our config file parameter list --> this tells every single step of nextflow to go through slurm, which is what caused it to 
+## Logging into posit workbench to access/use R 3.6.0: 
+### this is a tool for visualizing and interpreting RNA-seq data
+https://fiji-viz-3.int.colorado.edu/auth-sign-in?appUri=%2F
+use your RC login info
 
