@@ -1,4 +1,4 @@
-## notes from rinn master class (lesson 04)
+## notes from rinn master class (lesson 04, running nextflow)
 
 Data is here --> /scratch/Shares/rinnclass/MASTER_CLASS/DATA/mouse_wt_long_timecourse/
 Pre-cooked documents for running nextflow are here --> /scratch/Shares/rinnclass/MASTER_CLASS/DATA/docs/
@@ -39,3 +39,10 @@ transfering the samplesheet file: scp eroc4824@fiji.colorado.edu:/scratch/Shares
 this is a useful command for checking the status of your running job:
 ## tail -f nextflow.out --> this basically lets you see live updates as your job runs
 squeue -u eroc4824 is an alternative way to check the status of your job, just doesn't show you much
+
+
+### Notes after running nextflow pipeline through fiji/slurm on Friday 2/7/25:
+### the job ran successfully, so that's great
+- the job ran, but there was an issue for BIT where (based on the way we set up our nextflow.config file) we ended up submitting a ton of small jobs rather than just running the whole pipeline in one slurm step
+- additional parameter to add to our config file --> "queue Size = " so that you can specify the number of jobs it should make
+- "executor = slurm" --> this is what we had in our config file parameter list --> this tells every single step of nextflow to go through slurm, which is what caused it to run so many little jobs
