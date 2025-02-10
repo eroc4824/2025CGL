@@ -10,10 +10,8 @@ Pre-cooked documents for running nextflow are here --> /scratch/Shares/rinnclass
   4. output directory - make this file and then path to this file in your shell script so it knows where to put the results
 
 
-
-
 ## Now, our goal is to make a sample sheet:
-Hint - you can get these docs precooked in this file --> 
+Hint - you can get these docs precooked in this file on fiji --> /scratch/Shares/rinnclass/MASTER_CLASS/DATA/docs/
 
 ### NF-CORE website has info on input/outputs:
 https://nf-co.re/rnaseq/3.14.0
