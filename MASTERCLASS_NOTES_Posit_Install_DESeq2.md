@@ -50,10 +50,10 @@ If we tried to install DESeq2 without this older version of curl, it will fail
 > library(remotes)
 > install_version("curl", "5.2.3")
 
-
 ### Install BiocManager, DESeq2, and tidyverse
 > if (!requireNamespace("BiocManager", quietly = TRUE))
 + install.packages("BiocManager")
+
 ### Note for below: update=FALSE because of curl dependency
 > BiocManager::install("DESeq2", update=FALSE)    ### this "update=FALSE" helps keep it from using the updated broken version of curl
 > BiocManager::install("tidyverse", update=FALSE)
@@ -63,3 +63,19 @@ There will be a few informational items in the output when loading DESeq2 and ti
 
 Since this DESeq2 install will take a while, we'll close (NOT QUIT) the session by going to the "home" in posit --> this will show the status for your session as "executing"
 Once it is DONE executing / installing, you can suspend session (but wait until it's done)
+
+
+### Next, make sure you also have the following packages:
+rtracklayer
+dplyr
+IRanges
+ggplot2
+purrr
+margritrr
+pheatmap
+textshape
+Rcpp
+matrixStats
+readr
+tibble
+tidyr
