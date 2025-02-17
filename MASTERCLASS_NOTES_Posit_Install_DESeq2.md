@@ -33,16 +33,15 @@ nano ~/.Renviron --> type in: PATH=/opt/rh/devtoolset-10/root/bin:/usr/bin:$PATH
 ^this file basically tells fiji whenever you're using R, go to this file and find all this software
 from now on, it should go find and download these devtools automatically
 
-also make a nano .RProfile file
-paste in: .libPaths(c("/Users/eroc4824/R/Posit_libs", "/opt/R/4.3.1/lib/R/library/", .libPaths()))
-
 ### now start a new R session in posit workbench
 > assign(".lib.loc", c("/Users/eroc4824/R/Posit_libs", "/opt/R/4.3.1/lib/R/library/"), envir = environment(.libPaths))
 > .libPaths()   ### this command will just spit out your new library paths --> output should be [1] "/Users/eroc4824/R/Posit_libs" "/opt/R/4.3.1/lib/R/library/"
 
+also make a nano .Rprofile file   --> NOTE capitalization is SUPER important
+paste in: .libPaths(c("/Users/eroc4824/R/Posit_libs", "/opt/R/4.3.1/lib/R/library/", .libPaths()))
+
 note - you can also go into terminal on posit and that takes you directly into fiji
 however, changes you make directly in fiji don't necessarily get reflected in the R space
-
 
 ### Install older version of curl due to v.6+ issues:
 Curl is one of the dependencies for DESeq2
