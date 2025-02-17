@@ -24,7 +24,7 @@ Tools --> Global Options --> default R version: 4.3.1
 Then you can restart session (session tab) to make sure that it opens with this version
 Note that it will ALWAYS use this version now unless you specify another version
 
-# code for installing DESeq2:
+### code for installing DESeq2:
 on fiji, make a new directory for workflow & version control in your home directory (~ or /user/eroc4824, not scratch):
 mkdir ~/R/Posit_libs
 ls -lrt ~/R/P* --> total should be 0
@@ -32,6 +32,9 @@ ls -lrt ~/R --> list should include your Post_libs directory
 nano ~/.Renviron --> type in: PATH=/opt/rh/devtoolset-10/root/bin:/usr/bin:$PATH
 ^this file basically tells fiji whenever you're using R, go to this file and find all this software
 from now on, it should go find and download these devtools automatically
+
+also make a nano .RProfile file
+paste in: .libPaths(c("/Users/eroc4824/R/Posit_libs", "/opt/R/4.3.1/lib/R/library/", .libPaths()))
 
 ### now start a new R session in posit workbench
 > assign(".lib.loc", c("/Users/eroc4824/R/Posit_libs", "/opt/R/4.3.1/lib/R/library/"), envir = environment(.libPaths))
