@@ -1,0 +1,1202 @@
+---
+title: "Exploring cross-species conservation of peak-gene associations in mouse & human ES cells"
+author: "Erin O'Connor"
+date: "2025-04-25"
+output: 
+  html_document:
+    theme: cerulean
+    highlight: tango
+    fig_caption: true
+    fig_dir: "/scratch/Shares/rinnclass/MASTER_CLASS/STUDENTS/eroc4824/MASTER_CLASS/lessons/08_ATACseq_pipeline/eroc4824_FINAL_PROJECT/figures"
+editor_options:
+  chunk_output_type: console
+  markdown:
+    wrap: 72
+---
+
+#### Initial question - How does doxycycline (dox) exposure influence mammalian embryonic stem cells?
+- Background - doxycycline is an antibiotic often used to control transgene expression through Tet-On/Off inducible systems, yet little is known about the impact of dox treatment on embryonic stem cells (mouse or human). The purpose of this investigation is to uncover the genes and pathways influenced with extended dox treatment (various time points up to 150 minutes), and then determine the level of regulation influencing that gene expression (i.e. chromatin regulation vs some other form of gene regulation, potentially post-transcriptional etc).
+
+#### Experimental setup
+- RNA-seq: 3 replicates of ES cells, collected after 0h, 24h, 48h or 96h of dox exposure, for mouse & human
+- ATAC-seq: 1 replicate of ES cells (mouse & human) collected after 0, 30, 60, 90, 120, 150 minutes of dox exposure
+- 0h is considered the baseline control with no dox exposure
+
+#### RNA-seq Analysis Approach:
+I will run DESeq2 with contrast based on time "groups", then separately filter for genes upregulated between baseline and early and then genes downregulated between early and late. Then I can look for overlap between the gene subsets and visualize those genes.
+
+(1) Update sample metadata to define early (12h/24h) and late (48h/96h) time points  
+(2) Create the DESeqDataSet using the updated metadata, with group as the factor  
+(3) Run DESeq2, specifying contrasts for the early vs late comparison   
+(4) Find the overlap between the two gene subsets (intersect)
+(5) Filter and visualize the results (e.g., plot TPM over time, MA plots)
+
+#### Where is the data for human and mouse?
+(1) Mouse RNAseq data: /scratch/Shares/rinnclass/MASTER_CLASS/STUDENTS/eroc4824/MASTER_CLASS/lessons/04_RNAseq_Dox/01_Mouse_dox_wt/dox_long/dox_long_out/star_salmon/
+(2) Mouse ATAC data: /scratch/Shares/rinnclass/MASTER_CLASS/lessons/08_ATACseq_pipeline/00_run_pipeline/00_pipeline_run/pipeline_run/bwa/merged_library/macs2/broad_peak
+(3) Human RNAseq data: /scratch/Shares/rinnclass/MASTER_CLASS/DATA/human_rnaseq
+(4) Human ATAC data: /scratch/Shares/rinnclass/MASTER_CLASS/DATA/human_atacseq
+
+```{r setup for RNA-seq, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+.libPaths("~/R/Posit_libs")
+library(IRanges)
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(readr)
+library(ggplot2)
+library(purrr)
+library(magrittr)
+library(pheatmap)
+library(textshape)
+library(Rcpp)
+library(DESeq2)
+library(knitr)
+```
+
+#### Versions:
+- R version - R 4.3.1  
+- Install Java 21 prior to running Nextflow - module load openjdk/21.0.1  
+- nf-core/rnaseq version 3.14.0  
+- Genomes - mouse GRCm38.p6.genome.fa, human GRCh38 (hg38)
+
+#### Set up files for DESeq2
+Create sample metadata (colData) assigning sample info:   
+Tells DESeq2 which timepoint, time group, & replicate is associated with each sample
+```{r set up files for running DESeq2, echo = TRUE, message = FALSE, warning = FALSE}
+
+# laod Salmon counts from NF_CORE run 3.14
+counts_matrix_mouse <- read.table("/scratch/Shares/rinnclass/MASTER_CLASS/STUDENTS/eroc4824/MASTER_CLASS/lessons/04_RNAseq_Dox/01_Mouse_dox_wt/dox_long/dox_long_out/star_salmon/salmon.merged.gene_counts.tsv", header=TRUE, row.names=1)
+
+# prepare counts for DESEQ
+# create g2s with gene_id and gene_name info
+g2s_mouse <- data.frame(
+  gene_id = rownames(counts_matrix_mouse),
+  gene_name = counts_matrix_mouse[, 1]
+)
+
+# remove gene name column
+counts_matrix_mouse <-counts_matrix_mouse %>% 
+  select(-"gene_name")
+counts_integer <- round(counts_matrix_mouse)
+counts_filtered  <- counts_matrix_mouse[rowSums(counts_matrix_mouse) > 1, ]
+
+# Create a dataframe from counts_matrix that includes all column names:
+deseq_samples_mouse <- data.frame(
+  sample_id = colnames(counts_matrix_mouse))
+
+split_values <- strsplit(deseq_samples_mouse$sample_id, "_")
+time_values <- sapply(split_values, function(x) x[[2]]) # extract the 2nd value
+replicate_values <- sapply(split_values, function(x) x[[3]]) # extract the 3rd value
+deseq_samples_mouse$time_point <- time_values # add a column with time_values
+deseq_samples_mouse$replicate <- replicate_values  # add a column for replicates
+
+deseq_samples_mouse$time_point <- factor(deseq_samples_mouse$time_point)
+deseq_samples_mouse$replicate <- factor(deseq_samples_mouse$replicate)
+
+kable(head(deseq_samples_mouse), caption = "Mouse DESeq Sample Sheet")
+
+```
+
+#### Run DESeq2 for the mouse dox samples, comparing all time points to 0h:
+```{r run deseq2, echo = TRUE, message = FALSE, warning = FALSE}
+
+# test that the sample sheet and counts are arranged properly
+stopifnot(all(colnames(counts_integer) == deseq_samples_mouse$sample_id))
+
+# set up the dds
+dds_time_point_mouse <- DESeqDataSetFromMatrix(countData = counts_integer,
+                              colData = deseq_samples_mouse,
+                              design = ~ time_point)
+# run deseq
+dds_time_point_mouse <- DESeq(dds_time_point_mouse)
+```
+
+#### Extract the mouse DESeq2 results for each time point
+```{r compile DESEQ2 results, echo = TRUE, message = FALSE, warning = FALSE}
+
+# set up result names object for input to for-loop
+result_names <- resultsNames(dds_time_point_mouse)
+results_names <- result_names[-1]
+
+# Set up the dataframe - this will be filled in with the output of the for-loop
+res_df <- data.frame("gene_id" = character(), 
+                     "baseMean" = numeric(), 
+                     "log2FoldChange" = numeric(), 
+                     "lfcSE" = numeric(),
+                     "stat" = numeric(),
+                     "pvalue" = numeric(),
+                     "padj" = numeric(),
+                     "gene_name" = character(),
+                     "result_name" = character())
+
+# run for loop to retreive results from all time comparisons in dds
+for(i in 1:length(results_names)) {
+  results_name <- results_names[i]
+  res <- results(dds_time_point_mouse, name = results_name)
+  # temporary results data frame:  
+  tmp_res_df <- res %>% 
+    as.data.frame() %>%
+    rownames_to_column("gene_id") %>%
+    merge(g2s_mouse) %>%
+    mutate(result_name = results_name)
+  # the below code tells each iteration of the loop to put the output into the res_df data frame, then run the next iteration
+  res_df <- bind_rows(res_df, tmp_res_df)
+}
+```
+
+#### Filter for significant results based on padj<0.05 and L2FC>[1]
+```{r filter DESEQ results to padj<0.05 and L2FC>[1], echo = TRUE, message = FALSE, warning = FALSE}
+
+filtered_res_df_mouse <- res_df %>%
+  filter(padj < 0.05, abs(log2FoldChange) > 1)
+
+unique_sig_genes <- unique(filtered_res_df_mouse$gene_id)
+cat("Number of unique mouse genes that change with dox:", length(unique_sig_genes), "\n")
+```
+#### There are 666 individual genes that change significantly with dox across all time points.
+
+#### Export the DESeq2 results for these unique sig genes:
+```{r export unique significant genes list with count information, echo = TRUE, message = FALSE, warning = FALSE}
+
+# extract the data from filtered_res_df_mouse for these unique_sig_genes:
+sig_gene_results_mouse <- filtered_res_df_mouse %>%
+  filter(gene_id %in% unique_sig_genes)
+
+# move gene_name to the first column
+sig_gene_results_mouse <- sig_gene_results_mouse %>%
+  select(gene_name, everything())
+
+# now write that into a table, save in your results folder:
+write.csv(sig_gene_results_mouse, file = "/scratch/Shares/rinnclass/MASTER_CLASS/STUDENTS/eroc4824/MASTER_CLASS/lessons/08_ATACseq_pipeline/eroc4824_FINAL_PROJECT/results/DESeq2_sig_gene_results_mouse.csv", row.names = FALSE)
+
+# Show top 6 rows of unique significant DESeq2 results (already saved)
+knitr::kable(head(sig_gene_results_mouse), caption = "Example of unique significant mouse genes that change in response to dox (padj < 0.05, L2FC > [1])")
+```
+
+#### Filter for mouse genes UPregulated with dox
+The following tables depict the top significantly upregulated genes across all dox exposure time points. 
+```{r  highlight upregulated mouse dox genes, echo = TRUE, message = FALSE, warning = FALSE}
+
+up_genes_mouse <- sig_gene_results_mouse %>%
+  filter(log2FoldChange > 1)
+
+# print the number of upregulated genes
+cat("Number of upregulated genes:", nrow(up_genes_mouse), "\n")
+
+write.csv(up_genes_mouse,
+          file = "/scratch/Shares/rinnclass/MASTER_CLASS/STUDENTS/eroc4824/MASTER_CLASS/lessons/08_ATACseq_pipeline/eroc4824_FINAL_PROJECT/results/upregulated_dox_genes_mouse.csv",
+          row.names = FALSE)
+
+kable(
+  head(up_genes_mouse %>% arrange(desc(log2FoldChange))),
+  caption = "Top 6 Upregulated Genes (log2FC > 1)"
+)
+```
+
+#### Filter for mouse genes DOWNregulated with dox
+The following tables depict the top significantly downregulated genes across all dox exposure time points. 
+```{r highlight downregulated mouse dox genes, echo = TRUE, message = FALSE, warning = FALSE}
+
+down_genes_mouse <- sig_gene_results_mouse %>%
+  filter(log2FoldChange < -1)
+
+# print the number of downregulated genes
+cat("Number of downregulated genes:", nrow(down_genes_mouse), "\n")
+
+write.csv(down_genes_mouse,
+          file = "/scratch/Shares/rinnclass/MASTER_CLASS/STUDENTS/eroc4824/MASTER_CLASS/lessons/08_ATACseq_pipeline/eroc4824_FINAL_PROJECT/results/downregulated_genes_mouse.csv",
+          row.names = FALSE)
+
+kable(
+  head(down_genes_mouse %>% arrange(log2FoldChange)),
+  caption = "Top 6 Downregulated Genes (log2FC < -1)"
+)
+
+save(deseq_samples_mouse, counts_matrix_mouse, sig_gene_results_mouse, up_genes_mouse, down_genes_mouse,
+     file = "/scratch/Shares/rinnclass/MASTER_CLASS/STUDENTS/eroc4824/MASTER_CLASS/lessons/08_ATACseq_pipeline/eroc4824_FINAL_PROJECT/results/mouse_DESeq_data.RData")
+```
+
+#### Result - there are 666 genes that are unique and significantly changing in response to dox in mouse ES cells. Interestingly, there are 557 upregulated genes and 359 that are downregulated. So, since this sums to greater than 666, some of these genes are up and certain time points and down at others, since they show up in both subsets. This is interesting and suggests a dynamic gene expression response to dox treatment.
+
+Okay, now let's use this same approach to look at dox response in human ES cells (starting with the RNA-seq).
+
+### HUMAN:
+
+#### Load human counts files:
+```{r load human counts, echo = TRUE, message = FALSE, warning = FALSE}
+
+# Load Salmon gene-level counts
+counts_matrix_human <- read.table("/scratch/Shares/rinnclass/MASTER_CLASS/DATA/human_rnaseq/salmon.merged.gene_counts.tsv", header = TRUE, row.names = 1)
+
+# Create g2s: gene_id + gene_name
+g2s_human <- data.frame(
+  gene_id = rownames(counts_matrix_human),
+  gene_name = counts_matrix_human[, 1]
+)
+
+# Remove gene_name for DESeq2
+counts_matrix_human <- counts_matrix_human %>% select(-"gene_name")
+counts_integer_human <- round(counts_matrix_human)
+
+# Sample metadata
+deseq_samples_human <- data.frame(sample_id = colnames(counts_matrix_human))
+split_vals <- strsplit(deseq_samples_human$sample_id, "_")
+deseq_samples_human$time_point <- sapply(split_vals, function(x) x[[2]])
+deseq_samples_human$replicate <- sapply(split_vals, function(x) x[[3]])
+deseq_samples_human$time_point <- factor(deseq_samples_human$time_point)
+deseq_samples_human$replicate <- factor(deseq_samples_human$replicate)
+
+# Save colData
+save(deseq_samples_human, counts_matrix_human, 
+     file = "/scratch/Shares/rinnclass/MASTER_CLASS/STUDENTS/eroc4824/MASTER_CLASS/lessons/08_ATACseq_pipeline/eroc4824_FINAL_PROJECT/results/human_DESeq_data.RData")
+
+```
+
+#### run DESeq2
+```{r run DESeq2 on the human counts, echo = TRUE, message = FALSE, warning = FALSE}
+
+# Check sample alignment
+stopifnot(all(colnames(counts_integer_human) == deseq_samples_human$sample_id))
+
+# DESeq2 object
+dds_human <- DESeqDataSetFromMatrix(countData = counts_integer_human,
+                                    colData = deseq_samples_human,
+                                    design = ~ time_point)
+# Run DESeq
+dds_human <- DESeq(dds_human)
+```
+
+#### Extract the DESeq2 results for the human time point v 0h
+```{r extract DESeq2 results for human, echo = TRUE, message = FALSE, warning = FALSE}
+results_names_human <- resultsNames(dds_human)[-1]  # remove intercept
+res_df_human <- data.frame()
+
+for (res_name in results_names_human) {
+  res <- results(dds_human, name = res_name)
+  tmp <- as.data.frame(res) %>%
+    rownames_to_column("gene_id") %>%
+    merge(g2s_human, by = "gene_id") %>%
+    mutate(result_name = res_name)
+  res_df_human <- bind_rows(res_df_human, tmp)
+}
+```
+
+#### Filter significant results (padj < 0.05, L2FC > [1])
+```{r filter human results, echo = TRUE, message = FALSE, warning = FALSE}
+filtered_res_df_human <- res_df_human %>%
+  filter(padj < 0.05, abs(log2FoldChange) > 1)
+
+unique_sig_genes_human <- unique(filtered_res_df_human$gene_id)
+cat("Number of unique human genes that change with dox:", length(unique_sig_genes_human), "\n")
+
+# Extract full table of those genes
+sig_gene_results_human <- filtered_res_df_human %>%
+  filter(gene_id %in% unique_sig_genes_human) %>%
+  select(gene_name, everything())
+
+write.csv(sig_gene_results_human,
+          file = "/scratch/Shares/rinnclass/MASTER_CLASS/STUDENTS/eroc4824/MASTER_CLASS/lessons/08_ATACseq_pipeline/eroc4824_FINAL_PROJECT/results/DESeq2_sig_gene_results_human.csv",
+          row.names = FALSE)
+
+# Preview table
+knitr::kable(head(sig_gene_results_human), caption = "Top significant human genes that change in response to dox")
+```
+#### There are 7,338 individual human genes that change significantly with dox across all time points.
+
+#### Upregulated human genes
+```{r Upregulated human genes, echo = TRUE, message = FALSE, warning = FALSE}
+
+up_genes_human <- sig_gene_results_human %>% filter(log2FoldChange > 1)
+
+cat("Number of upregulated genes (human):", nrow(up_genes_human), "\n")
+
+write.csv(up_genes_human,
+          "/scratch/Shares/rinnclass/MASTER_CLASS/STUDENTS/eroc4824/MASTER_CLASS/lessons/08_ATACseq_pipeline/eroc4824_FINAL_PROJECT/results/upregulated_dox_genes_human.csv",
+          row.names = FALSE)
+
+kable(
+  head(up_genes_human %>% arrange(desc(log2FoldChange))),
+  caption = "Top 6 Upregulated Human Genes (log2FC > 1)"
+)
+```
+
+#### Downregulated human genes
+```{r Downregulated human genes, echo = TRUE, message = FALSE, warning = FALSE}
+
+down_genes_human <- sig_gene_results_human %>% filter(log2FoldChange < -1)
+
+cat("Number of downregulated genes (human):", nrow(down_genes_human), "\n")
+
+write.csv(down_genes_human,
+          "/scratch/Shares/rinnclass/MASTER_CLASS/STUDENTS/eroc4824/MASTER_CLASS/lessons/08_ATACseq_pipeline/eroc4824_FINAL_PROJECT/results/downregulated_genes_human.csv",
+          row.names = FALSE)
+
+kable(
+  head(down_genes_human %>% arrange(log2FoldChange)),
+  caption = "Top 6 Downregulated Human Genes (log2FC < -1)"
+)
+
+save(deseq_samples_human, counts_matrix_human, sig_gene_results_human, up_genes_human, down_genes_human,
+     file = "/scratch/Shares/rinnclass/MASTER_CLASS/STUDENTS/eroc4824/MASTER_CLASS/lessons/08_ATACseq_pipeline/eroc4824_FINAL_PROJECT/results/mouse_DESeq_data.RData")
+```
+
+#### Result - there seem to be more genes in human ES cells that are affected by dox exposure.
+
+#### Next, I want to ask how much overlap there is between mouse and human up and down dox genes:
+
+
+#### Load ortholog information for human/mouse to connect the genes in each list:
+```{r load orthologs, echo = TRUE, message = FALSE, warning = FALSE}
+
+library(BiocManager)
+
+library(biomaRt)
+library(Biostrings)
+library(XML)
+library(RCurl)
+library(httr)
+library(jsonlite)
+library(data.table)
+library(BiocGenerics)
+library(Biobase)
+library(S4Vectors)
+library(IRanges)
+library(AnnotationDbi)
+library(GenomeInfoDb)
+library(stringi)
+library(tidyverse)
+
+# Use Ensembl BioMart
+mouse_mart <- useMart("ensembl", dataset = "mmusculus_gene_ensembl")
+
+# Connect to Ensembl and use mouse gene dataset
+mouse_mart <- useMart("ensembl", dataset = "mmusculus_gene_ensembl")
+
+# download ortholog mapping table
+orthologs <- getBM(
+  attributes = c(
+    "ensembl_gene_id",                  # Mouse Ensembl ID
+    "external_gene_name",               # Mouse gene symbol
+    "hsapiens_homolog_ensembl_gene",    # Human Ensembl ID
+    "hsapiens_homolog_associated_gene_name",  # Human gene symbol
+    "hsapiens_homolog_orthology_type"   # Type of orthology
+  ),
+  mart = mouse_mart
+)
+
+colnames(orthologs) <- c("mouse_gene_id", "mouse_gene_name",
+                         "human_gene_id", "human_gene_name",
+                         "orthology_type")
+
+# filter for high confidence orthologs - keep only 1:1 orthologs
+orthologs_filtered <- orthologs %>% filter(orthology_type == "ortholog_one2one")
+
+
+kable(head(orthologs_filtered), caption = "Top 6 One-to-One Orthologs")
+
+# save the filtered ortholog file
+write.csv(orthologs_filtered, file = "/scratch/Shares/rinnclass/MASTER_CLASS/STUDENTS/eroc4824/MASTER_CLASS/lessons/08_ATACseq_pipeline/eroc4824_FINAL_PROJECT/results/mouse_human_orthologs.csv", row.names = FALSE)
+
+# confirm that this worked:
+orthologs_filtered <- read.csv("/scratch/Shares/rinnclass/MASTER_CLASS/STUDENTS/eroc4824/MASTER_CLASS/lessons/08_ATACseq_pipeline/eroc4824_FINAL_PROJECT/results/mouse_human_orthologs.csv")
+```
+
+#### Load human and mouse up- and down-regulated genes
+```{r load the saved gene lists, echo = TRUE, message = FALSE, warning = FALSE}
+
+up_mouse <- read.csv("/scratch/Shares/rinnclass/MASTER_CLASS/STUDENTS/eroc4824/MASTER_CLASS/lessons/08_ATACseq_pipeline/eroc4824_FINAL_PROJECT/results/upregulated_dox_genes_mouse.csv")
+down_mouse <- read.csv("/scratch/Shares/rinnclass/MASTER_CLASS/STUDENTS/eroc4824/MASTER_CLASS/lessons/08_ATACseq_pipeline/eroc4824_FINAL_PROJECT/results/downregulated_genes_mouse.csv")
+
+up_human <- read.csv("/scratch/Shares/rinnclass/MASTER_CLASS/STUDENTS/eroc4824/MASTER_CLASS/lessons/08_ATACseq_pipeline/eroc4824_FINAL_PROJECT/results/upregulated_dox_genes_human.csv")
+down_human <- read.csv("/scratch/Shares/rinnclass/MASTER_CLASS/STUDENTS/eroc4824/MASTER_CLASS/lessons/08_ATACseq_pipeline/eroc4824_FINAL_PROJECT/results/downregulated_genes_human.csv")
+```
+
+#### Match the orthologs to the gene lists:
+```{r align orthologs and differentially expressed genes, echo = TRUE, message = FALSE, warning = FALSE}
+
+# First, because our gene lists and ortholog list gene IDs do not match, we need to reformat our gene lists IDs.
+# example from up_mouse$gene_ID: "ENSMUSG00000058625.6"
+# example from orthologs_filtered$mouse_gene_id: "ENSMUSG00000064341"
+up_mouse <- up_mouse %>%
+  mutate(gene_id = sub("\\..*", "", gene_id))
+
+down_mouse <- down_mouse %>%
+  mutate(gene_id = sub("\\..*", "", gene_id))
+
+up_human <- up_human %>%
+  mutate(gene_id = sub("\\..*", "", gene_id))
+
+down_human <- down_human %>%
+  mutate(gene_id = sub("\\..*", "", gene_id))
+
+# Match mouse DEGs to their human orthologs
+up_mouse_orth <- merge(up_mouse, orthologs_filtered, by.x = "gene_id", by.y = "mouse_gene_id")
+down_mouse_orth <- merge(down_mouse, orthologs_filtered, by.x = "gene_id", by.y = "mouse_gene_id")
+
+# Match human DEGs to their human gene IDs - this will just give us a list of human gene IDs
+up_human_ids <- unique(up_human$gene_id)
+down_human_ids <- unique(down_human$gene_id)
+```
+
+#### Find the overlap (conserved genes that change with dox):
+```{r find overlap, echo = TRUE, message = FALSE, warning = FALSE}
+# Find the overlap between mouse and human
+# Upregulated in both
+shared_up_orthologs <- up_mouse_orth %>%
+  filter(human_gene_id %in% up_human_ids)
+
+# Downregulated in both
+shared_down_orthologs <- down_mouse_orth %>%
+  filter(human_gene_id %in% down_human_ids)
+
+# Save tables
+write.csv(shared_up_orthologs, "/scratch/Shares/rinnclass/MASTER_CLASS/STUDENTS/eroc4824/MASTER_CLASS/lessons/08_ATACseq_pipeline/eroc4824_FINAL_PROJECT/results/shared_upregulated_orthologs.csv", row.names = FALSE)
+write.csv(shared_down_orthologs, "/scratch/Shares/rinnclass/MASTER_CLASS/STUDENTS/eroc4824/MASTER_CLASS/lessons/08_ATACseq_pipeline/eroc4824_FINAL_PROJECT/results/shared_downregulated_orthologs.csv", row.names = FALSE)
+
+kable(head(shared_up_orthologs), caption = "Shared Up Orthologs")
+kable(head(shared_down_orthologs), caption = "Shared Down Orthologs")
+```
+
+#### Summarize and visualize the overlap of mouse and human differentially expressed dox genes:
+```{r summarize and visualize the overlap, venn_diagram, fig.width=10, fig.height=10, echo = TRUE, message = FALSE, warning = FALSE}
+
+# Summarize the overlap:
+cat("Number of shared upregulated genes:", nrow(shared_up_orthologs), "\n")
+cat("Number of shared downregulated genes:", nrow(shared_down_orthologs), "\n")
+
+# visualize the overlap of upregulated near-peak genes
+library(VennDiagram)
+library(grid)
+grid.newpage() # create a new plotting page
+venn.plot.up <- invisible(draw.pairwise.venn(
+  area1 = nrow(up_mouse_orth),
+  area2 = length(up_human_ids),
+  cross.area = nrow(shared_up_orthologs),
+  category = c("Mouse Up", "Human Up"),
+  fill = c("dodgerblue", "tomato"),
+  alpha = 0.5,
+  lty = "blank",
+  cex = 2,
+  cat.cex = 1.5,
+  cat.pos = c(-20, 20),
+  cat.dist = 0.05
+))
+
+# visualize the overlap of downregulated near-peak genes
+grid.newpage()
+venn.plot.down <- invisible(draw.pairwise.venn(
+  area1 = nrow(down_mouse_orth),
+  area2 = length(down_human_ids),
+  cross.area = nrow(shared_down_orthologs),
+  category = c("Mouse Down", "Human Down"),
+  fill = c("dodgerblue", "tomato"),
+  alpha = 0.5,
+  lty = "blank",
+  cex = 2,
+  cat.cex = 1.5,
+  cat.pos = c(-20, 20),
+  cat.dist = 0.05
+))
+
+```
+
+#### Result - there are 16 upregulated dox response genes shared between mouse and human ES cells, and there are 69 overlapping downregulated. This is across all time points, so there may be some genes shared between these sets, where a given gene is up relative to baseline at one time point, but down at another.
+
+
+## ATAC-seq Analysis - Chromatin Accessibility
+#### Now, we want to understand what mechanisms are contributing to these changes at the transcriptional level. How are these genes being regulated? 
+- While there are many levels of gene regulation, changing the chromatin lanscape to make certain genes more accessible to transcriptional machinery is a very likely possibility. 
+- So we will also analyze ATAC-seq (Assay for Transposase-Accessible Chromatin) to determine if the changes we're seeing are reflected in the chromatin.
+
+#### ATAC Analysis Approach:
+(1) Load in peak files to list of GRanges --> using custom function "import_peaks". 
+(2) Find peaks common to all samples. 
+(3) Find peaks that are unique to dox and control conditions, respectively. 
+(4) Determine if any of these peaks align with annotated mouse genes
+(5) Compare the overlapping peaks that are annotated - genes
+(6) Perform statistical analysis of differential accessibility using DESeq2
+(7) Look for any interesting relationships between peak accessibility and gene expression - i.e. are the  genes upregulated in response to dox accessible in all conditions?
+
+```{r setup for ATAC, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+source("/scratch/Shares/rinnclass/MASTER_CLASS/STUDENTS/eroc4824/MASTER_CLASS/util/00_our_first_ATAC_function.R")
+
+.libPaths("~/R/Posit_libs")
+library(BiocManager)
+# BiocManager::install("rtracklayer")
+library(GenomicRanges)
+library(IRanges)
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(readr)
+library(ggplot2)
+library(purrr)
+library(magrittr)
+library(pheatmap)
+library(textshape)
+library(Rcpp)
+library(DESeq2)
+library(stringr)
+library(stringi)
+library(rtracklayer)
+```
+
+##### Where are my MACS2 outputs?
+Loading in ATAC peak files using our custom function: import_peaks (output = list of GRanges).
+```{r load in peak files to make list of GRanges, echo = TRUE, message = FALSE, warning = FALSE}
+
+source("/scratch/Shares/rinnclass/MASTER_CLASS/STUDENTS/eroc4824/MASTER_CLASS/util/00_our_first_ATAC_function.R")
+
+# establish peak path to the directory with MACS2 output files from NF_CORE ATAC-seq pipeline
+peak_path <- "/scratch/Shares/rinnclass/MASTER_CLASS/lessons/08_ATACseq_pipeline/00_run_pipeline/00_pipeline_run/pipeline_run/bwa/merged_library/macs2/broad_peak"
+
+# creating a file list also needed for import_peaks function to get sample name associated with file
+fl <- list.files(peak_path, full.names = TRUE, pattern = ".broadPeak")
+
+# running import_peaks
+my_peaks <- import_peaks(consensus_file_path = peak_path)
+
+print("number of peaks for each sample")
+print(num_peaks <- sapply(my_peaks, length) %>% as.data.frame)
+```
+
+##### Find the peaks common to all mouse conditions / samples:
+Identify the peaks that are called by MACS2 in all the time points.
+These sites are likely unimportant to the dox response that we see in terms of gene expression.
+```{r find common peaks in all timepoints, dependson="previous_chunk", echo = TRUE, message = FALSE, warning = FALSE}
+# using find_common_peaks function:
+common_peaks <-  find_common_peaks(my_peaks)
+
+length(common_peaks)
+```
+
+##### Now find the MACS2-called peaks that are unique to the dox time points and the baseline 0min control:
+Use the function "find_common_peaks" to find peaks specific to each condition.
+
+Unique to non-dox samples (0 min time point):
+```{r non-dox unique atac peaks, dependson="previous_chunk", echo = TRUE, message = FALSE, warning = FALSE}
+
+# common peaks in non-dox (0 time point)
+non_dox_samples <- my_peaks[c("KO_control_0", "WT_control_0")]
+non_dox_common_peaks <- find_common_peaks(non_dox_samples)
+print(c("Number of peaks common to non-dox:", length(non_dox_common_peaks)))
+```
+
+Unique to dox samples:
+```{r dox unique samples, dependson="previous_chunk", echo = TRUE, message = FALSE, warning = FALSE}
+# common peaks in dox time points
+dox_samples <- names(my_peaks)[!grepl("_0$", names(my_peaks))]
+dox_peaks <- my_peaks[dox_samples]
+dox_common_peaks <- find_common_peaks(dox_peaks)
+print(c("Number of peaks common to dox",length(dox_common_peaks)))
+```
+
+Overlap of dox and non-dox (to get unique peaks for each condition)
+```{r overlap of dox vs non-dox atac peaks, dependson="previous_chunk", echo = TRUE, message = FALSE, warning = FALSE}
+
+# overlap between dox and non-dox common peaks:
+dox_compare_list <- list(non_dox = non_dox_common_peaks, dox = dox_common_peaks)
+dox_non_dox_ov <- find_common_peaks(dox_compare_list)
+print(c("This is how many peaks are common in both non- and dox treatments", length(dox_non_dox_ov)))
+
+# extract peaks unique to each condition (dox v non-dox):
+# Peaks unique to non_dox:
+unique_to_non_dox <-find_my_peaks(dox_non_dox_ov, non_dox_common_peaks)
+# Peaks unique to dox:
+unique_to_dox <- find_my_peaks(dox_non_dox_ov, dox_common_peaks)
+```
+
+Number of peaks unique to non-dox condition:
+`r length(unique_to_non_dox)`
+
+Number of peaks unique to dox condition:
+`r length(unique_to_dox)` 
+
+#### Results:
+- Almost all peaks common in dox were also present in non-dox, based on this overlap analysis
+- 37,435 dox common peaks overlapped with the 38,984 non-dox peaks (96%)
+- 16,312 peaks were unique to non-dox
+- 1,549 unique peaks were unique to dox
+- There seem to be more non-dox specific peaks
+NOTE - this overlap approach is not based on statistics - we need to run DESeq2 to identify significant differences
+
+#### Create mouse gene, lncRNA, mRNA annotation GRange objects:
+Now, create GRange objects of genome annotations from Gencode mv25. I will create gene annotation GRanges and their corresponding promoter regions. I can then overlap these objects with ATAC peaks.
+```{r create genome annotation GRanges, dependson="previous_chunk", echo = TRUE, message = FALSE, warning = FALSE}
+
+# Load gencode genome annotation as GRanges 
+# gencode_gr_mouse <- rtracklayer::import("/scratch/Shares/rinnclass/MASTER_CLASS/GENOMES/M25/gencode.vM25.annotation.gtf")
+
+# Filter to genes only
+# gencode_genes_mouse <- gencode_gr_mouse[gencode_gr_mouse$type == "gene"] 
+# Filter for promoters
+# gene_promoters <- promoters(gencode_genes_mouse, upstream = 2000, downstream = 2000)
+
+# save GTF filtered for genes into my directory so I don't need to import whole GTF each time
+# saveRDS(gencode_genes_mouse, file = "/scratch/Shares/rinnclass/MASTER_CLASS/STUDENTS/eroc4824/MASTER_CLASS/lessons/08_ATACseq_pipeline/eroc4824_FINAL_PROJECT/Genomes/gencode.vM25.genes_only.rds")
+
+# save GTF filtered for promoters regions to the same final directory:
+# saveRDS(gene_promoters, file = "/scratch/Shares/rinnclass/MASTER_CLASS/STUDENTS/eroc4824/MASTER_CLASS/lessons/08_ATACseq_pipeline/eroc4824_FINAL_PROJECT/Genomes/gencode.vM25.promoters_only.rds")
+
+gencode_genes_mouse <- readRDS("/scratch/Shares/rinnclass/MASTER_CLASS/STUDENTS/eroc4824/MASTER_CLASS/lessons/08_ATACseq_pipeline/eroc4824_FINAL_PROJECT/Genomes/gencode.vM25.genes_only.rds")
+
+gene_promoters <- readRDS("/scratch/Shares/rinnclass/MASTER_CLASS/STUDENTS/eroc4824/MASTER_CLASS/lessons/08_ATACseq_pipeline/eroc4824_FINAL_PROJECT/Genomes/gencode.vM25.promoters_only.rds")
+
+```
+
+#### Now we can look at the overlap between the called mouse peaks unique to each condition and the annotation objects we've created here:
+```{r dox v non-dox unique peak overlap with gene promoters, dependson="previous_chunk", echo = TRUE, message = FALSE, warning = FALSE}
+
+# gr_list of promoters and peaks unique to non_dox condition
+gr_list_gene_promoter_non_dox_ov <- list( gene_promoters = gene_promoters, non_dox_peaks = unique_to_non_dox)
+non_dox_gene_promoter_ov <- find_common_peaks(gr_list_gene_promoter_non_dox_ov)
+
+print("This is how many non-dox_unique peaks overlapped gene promoters")
+length(non_dox_gene_promoter_ov)
+
+# peaks unique to dox condition overlapped with gene promoters
+gr_list_gene_promoter_dox_ov <- list( gene_promoters = gene_promoters, dox_peaks = unique_to_dox)
+dox_gene_promoter_ov <- find_common_peaks(gr_list_gene_promoter_dox_ov)
+
+print(c("This is how many dox_unique peaks overlapped gene promoters", length(dox_gene_promoter_ov)))
+
+# filter significant genes from RNAseq "filtered_res_df_mouse" to non-dox unique promoter overlaps
+sig_rnaseq_atac_non_dox <- non_dox_gene_promoter_ov[non_dox_gene_promoter_ov$gene_id %in% filtered_res_df_mouse$gene_id]
+
+# filter significant genes from RNAseq "filtered_res_df_mouse" to dox unique promoter overlaps
+sig_rnaseq_atac_dox <- dox_gene_promoter_ov[dox_gene_promoter_ov$gene_id %in% filtered_res_df_mouse$gene_id]
+
+print(c("this is how many genes overlap between RNAseq and ATACseq non-dox peaks", length(sig_rnaseq_atac_dox)))
+```
+
+Number of genes that overlap between RNA-seq and ATAC-seq non-dox peaks:
+`r length(sig_rnaseq_atac_non_dox)`
+
+Here are the gene names that overlap for non-dox peaks:
+`r sig_rnaseq_atac_non_dox$gene_name`
+
+Number of genes that overlap between RNA-seq and ATAC-seq dox peaks:
+`r length(sig_rnaseq_atac_dox)`
+
+Here are the gene names that overlap for dox peaks:
+`r sig_rnaseq_atac_dox$gene_name`
+
+
+##### Visualize the overlap with ggplot Venn Diagram:
+``` {r visualize the RNA and ATAC overlap for dox and non-dox samples, venn_diagram, fig.width=10, fig.height=10, dependson="previous_chunk", echo = TRUE, message = FALSE, warning = FALSE}
+
+# Install and load the VennDiagram package
+# install.packages("VennDiagram", repos = "https://cloud.r-project.org")
+library(VennDiagram)
+
+# ---- Venn: Non-Dox RNA vs ATAC ----
+rna_genes <- filtered_res_df_mouse$gene_id
+non_dox_genes <- non_dox_gene_promoter_ov$gene_id
+overlap_nd <- length(intersect(rna_genes, non_dox_genes))
+
+grid.newpage()  # Create a new plotting page
+venn.plot.nd <- invisible(draw.pairwise.venn(
+  area1 = length(rna_genes),
+  area2 = length(non_dox_genes),
+  cross.area = overlap_nd,
+  category = c("RNAseq", "Non_Dox_ATAC"),
+  fill = c("lightblue", "dodgerblue"),
+  alpha = 0.5,
+  lty = "blank",
+  cex = 1.5,
+  cat.cex = 1.5,
+  cat.pos = c(-20, 20),
+  cat.dist = 0.05
+))
+
+
+# ---- Venn: Dox RNA vs ATAC ----
+dox_genes <- dox_gene_promoter_ov$gene_id
+overlap_dox <- length(intersect(rna_genes, dox_genes))
+
+grid.newpage()
+venn.plot.dox <- invisible(draw.pairwise.venn(
+  area1 = length(rna_genes),
+  area2 = length(dox_genes),
+  cross.area = overlap_dox,
+  category = c("RNAseq", "Dox_ATAC"),
+  fill = c("turquoise", "pink"),
+  alpha = 0.5,
+  lty = "blank",
+  cex = 1.5,
+  cat.cex = 1.5,
+  cat.pos = c(-20, 20),
+  cat.dist = 0.05
+))
+
+```
+
+##### Result - There is essentially no overlap between the differentially expressed genes and the called peaks in either condition in mouse.
+
+#### DESeq Analysis to look for significantly differentially accessible peaks for mouse:
+Now I am comparing peak read counts across samples for dox and non-dox conditions. To do this, I'll use the consensus peaks output (any peak called in any condition) and feature counts of each consensus peak to be used as input into DESeq2 for differential peak counts (a very similar approach to the RNA-seq DESeq analysis).
+```{r make input files and run DESeq2 on feature counts of consensus peaks from the NF_CORE output, dependson="previous_chunk", echo = TRUE, message = FALSE, warning = FALSE}
+
+# consensus peaks
+broad_consensus_peaks <- read.table("/scratch/Shares/rinnclass/MASTER_CLASS/lessons/08_ATACseq_pipeline/00_run_pipeline/00_pipeline_run/pipeline_run/bwa/merged_library/macs2/broad_peak/consensus/consensus_peaks.mLb.clN.annotatePeaks.txt", sep = "\t", header = TRUE)
+
+# consensus peak counts
+broad_consensus_counts <- read.table("/scratch/Shares/rinnclass/MASTER_CLASS/lessons/08_ATACseq_pipeline/00_run_pipeline/00_pipeline_run/pipeline_run/bwa/merged_library/macs2/broad_peak/consensus/consensus_peaks.mLb.clN.featureCounts.txt", sep = "\t", header = TRUE)
+
+# creating sample sheet "atac_samples" from file names (col names of consensus):
+rownames(broad_consensus_counts) <- broad_consensus_counts$Geneid
+
+broad_consensus_counts <- broad_consensus_counts %>%
+  dplyr::select(-c(Geneid, Chr, Start, End, Strand, Length))
+colnames(broad_consensus_counts) <- gsub("_REP1",
+                                         "_R1",
+                                         gsub(
+                                           "\\.mLb\\.clN\\.sorted\\.bam",
+                                           "",
+                                           colnames(broad_consensus_counts)
+                                         ))
+count_columns <- colnames(broad_consensus_counts)
+
+atac_samples <- data.frame(
+  sample = count_columns,
+  condition = ifelse(
+    grepl("_0_", count_columns),
+    "non-dox",
+    ifelse(grepl("non-dox", count_columns), "non-dox", "dox")
+  ),
+  timepoint_minutes = as.numeric(sub(".*_(\\d+)_R1.*", "\\1", count_columns))
+)
+
+# Factor condition for DESEQ2
+atac_samples <- atac_samples %>%
+  mutate(condition = factor(condition, levels = c("non-dox", "dox")))
+
+# matrix for Deseq2
+atac_dds_condition <- DESeqDataSetFromMatrix(countData = broad_consensus_counts, 
+                                   colData = atac_samples, 
+                                   design = ~ condition)
+# Run DESeq2 condition model
+atac_dds_condition <- DESeq(atac_dds_condition)
+```
+
+#### Extract and analyze the mouse DESeq2 results:
+Create a dataframe with pvalues and lfc etc
+```{r extract DESeq2 results, dependson="previous_chunk", echo = TRUE, message = FALSE, warning = FALSE}
+
+# Extract DESeq2 results
+atac_lfc_condition <- results(atac_dds_condition) %>%
+  as.data.frame() %>%
+  rownames_to_column("interval_id")
+
+# Merge with the broad_consensus_peaks
+colnames(broad_consensus_peaks)[1] <- "interval_id"
+
+atac_lfc_condition <- merge(atac_lfc_condition, 
+                  broad_consensus_peaks %>%
+                    dplyr::select(interval_id, Gene.Name, Nearest.PromoterID, 
+                                  Distance.to.TSS, Chr, Start, End),
+                  by = "interval_id")
+```
+
+#### Visualize the distribution of adjusted p-values:
+```{r analysis of DESEQ2 on ATAC peak counts, echo = TRUE, message = FALSE, warning = FALSE}
+
+hist(atac_lfc_condition$padj, main = "Histogram of Adjusted p-values", xlab = "Adjusted p-value")
+
+```
+It looks like all our adjusted p-values are close to 1, and none seem to be significant.
+
+#### Now, let's filter this list based on adjusted p-value to confirm this:
+```{r filter DESEQ2 results for significant padj, dependson="previous_chunk", echo = TRUE, message = FALSE, warning = FALSE}
+
+sig_atac_peaks <- atac_lfc_condition %>% dplyr::filter(!is.na(padj) & padj < 0.05)
+length(sig_atac_peaks$Gene.Name)
+```
+
+### Result - there are no significant differences in chromatin accessibility with dox treatment in mouse embryonic stem cells.
+This finding is interesting on its own and informs us about the level of gene regulation involved in the response to dox, pointing towards other kinds of co-transcriptional or post-transcriptional regulation. But there is not much else we can do to look at the dox response through the lens of chromatin regulation.
+
+
+### What other questions can we ask to learn more from these ATAC data sets?
+
+#### New analysis objective: What is the relationship betweek peak accessibility and gene expression in embryonic stem cells, and is this relationship conserved across species?
+I am going to look for peaks that are always near a gene and ask if those genes are also more expressed (in all conditions). i.e. does having more accessible regulatory elements near a gene make it more likely to be highly expressed?
+
+In other words, we are asking: if these peaks are always present next to a gene (and may promote higher gene expression), is this kind of relationship between genomic regions conserved in different mammalian species (mouse v human)?
+
+For the ATAC-seq analysis, I will use the MACS2 output files from the NF_CORE Pipeline --> i.e. -broad.peak -consensus.broad.peak -consensus.feature.counts
+
+#### Approach:
+(1) Identify peaks near genes, common to all samples (create consensus "peak-near-gene" lists)
+    - Identify peaks near genes (within 5kb of the TSS) in mouse and human, separately
+    - Find peaks within this subset common to all samples for mouse and human, separately
+    - Use the "find_common_peaks" function
+
+(2) Compare expression of genes with and without nearby peaks
+    - Here we are asking: Are genes with a nearby ATAC peak more highly expressed than those without one?
+    - Use the 0h RNA-seq data for a clean comparison, since dox has no impact on accessibility
+    - Make gene lists for those that are near peaks, and those genes that are excluded from that list.
+    - Run DESeq2 to compare the expression level of those two sets of genes
+
+(3) Look for cross-species conservation - find the overlap between mouse and human
+    - Make a list of the genes that follow this "peak-near-gene & high-expression" pattern
+    - Then look at the overlap between those gene sets for mouse and human (intersect based on orthologs)
+    - Visualize with VennDiagram
+
+(4) Overlay with “conserved dox response” genes
+    - Can also see if this "peak-near-gene & high-expression" pattern holds true for the "conserved dox response" genes that we know change with dox in both the mouse and human
+    - Enrichment test: are “conserved dox response” genes enriched among the “peak + expression” group?
+    - we have a list of the genes that change in both mouse and human with dox: 
+
+### (1) Identify peaks near genes, common to all samples (mouse and human)
+This tells us there's an ATAC peak near these genes in all samples
+
+#### Define mouse peaks that are within 5kb upstream or downstream of the TSS (TSS regions):
+``` {r define TSS-centered peaks within 5kb, then , echo = TRUE, message = FALSE, warning = FALSE}
+
+tss_regions_mouse <- promoters(gencode_genes_mouse, upstream = 5000, downstream = 5000)
+```
+
+#### Find common overlap across all mouse samples using "find_common_peaks" function:
+```{r find overlap across all mouse samples for peaks_near_genes, echo = TRUE, message = FALSE, warning = FALSE}
+
+# Find common peaks across all mouse samples (my_peaks that we defined earlier)
+common_peaks_mouse <- find_common_peaks(my_peaks)
+
+# create a list of two GRanges objects:
+gr_list_common_peaks_mouse <- list(
+  tss_regions = tss_regions_mouse,
+  common_peaks = common_peaks_mouse
+)
+
+# then pass this list through the find_common_peaks function we've already defined:
+peaks_near_genes_mouse <- find_common_peaks(gr_list_common_peaks_mouse)
+length(peaks_near_genes_mouse)
+```
+
+#### Result - there are 22,111 peaks-near-genes that are common across all the mouse samples
+
+### Now do the same thing with the human ATAC data:
+#### Load the human ATAC data:
+```{r load human ATAC peak files, echo = TRUE, message = FALSE, warning = FALSE}
+
+source("/scratch/Shares/rinnclass/MASTER_CLASS/STUDENTS/eroc4824/MASTER_CLASS/util/00_our_first_ATAC_function.R")
+human_peak_path <- "/scratch/Shares/rinnclass/MASTER_CLASS/DATA/human_atacseq"
+
+# include only 1 replicate per time point to be consistent between human and mouse:
+rep1_files <- list.files(human_peak_path, full.names = TRUE, pattern = "REP1.*broadPeak$")
+
+# load peak files into a list of GRanges objects
+human_peaks <- import_peaks_human(consensus_file_path = human_peak_path, pattern = "REP1.*broadPeak$")
+print("Number of peaks for each sample")
+print(num_peaks_human <- sapply(human_peaks, length) %>% as.data.frame)
+```
+
+#### Find the peaks common to all human samples:
+Identify the peaks that are called by MACS2 in all the time points.
+```{r find common human peaks across all time points, echo = TRUE, message = FALSE, warning = FALSE}
+
+# use the find_common_peaks function:
+common_peaks_human <-  find_common_peaks(human_peaks)
+
+length(common_peaks_human)
+```
+
+#### Load the human genome data and define promoter/TSS regions:
+``` {r load and process the human genome data, echo = TRUE, message = FALSE, warning = FALSE}
+
+# Load human gencode genome annotation
+# This import takes a LOT of time, so we can actually just load the gene feature information, since for this analysis, we don't need info on transcript, exon, UTR, etc
+# gencode_gr_human <- rtracklayer::import("/scratch/Shares/rinnclass/MASTER_CLASS/DATA/genomes/Homo_sapiens/Gencode/v38/gencode.v38.annotation.gtf", feature.type = "gene")
+
+# Extract gene entries only (redundant since we only imported genes, but good to be sure):
+# gencode_genes_human <- gencode_gr_human[gencode_gr_human$type == "gene"]
+
+# saveRDS(gencode_genes_human, file = "/scratch/Shares/rinnclass/MASTER_CLASS/STUDENTS/eroc4824/MASTER_CLASS/lessons/08_ATACseq_pipeline/eroc4824_FINAL_PROJECT/Genomes/gencode.v38.human_genes_only.rds")
+
+gencode_genes_human <- readRDS("/scratch/Shares/rinnclass/MASTER_CLASS/STUDENTS/eroc4824/MASTER_CLASS/lessons/08_ATACseq_pipeline/eroc4824_FINAL_PROJECT/Genomes/gencode.v38.human_genes_only.rds")
+
+# Define ±5kb regions around TSS
+tss_regions_human <- promoters(gencode_genes_human, upstream = 5000, downstream = 5000)
+```
+
+#### Find common overlap across all human samples using "find_common_peaks" function:
+```{r find overlap across all human samples for peaks_near_genes, echo = TRUE, message = FALSE, warning = FALSE}
+
+# create a list of two GRanges objects:
+gr_list_common_peaks_human <- list(
+  tss_regions = tss_regions_human,
+  common_peaks = common_peaks_human
+)
+
+# then pass this list through the find_common_peaks function we've already defined:
+peaks_near_genes_human <- find_common_peaks(gr_list_common_peaks_human)
+length(peaks_near_genes_human)
+```
+##### Result - there are 28,901 peaks-near-genes that are common across all the human samples
+
+
+#### (2) Compare expression of genes with and without nearby peaks
+I will use the 0 hour RNA-seq sample for a cleaner comparison, since we aren't asking anything related to dox exposure in this case.
+
+Workflow:
+  - Define gene groups
+  - Extract expression
+  - Get average expression per gene at time 0
+  - Compare groups - visualize with violin plots, test significance with a wilcox test to compare expression distributions
+
+#### Start with mouse:
+
+#### Define mouse gene lists that you want to compare:
+```{r create gene lists to identy near-peak vs no-peak mouse genes, echo = TRUE, message = FALSE, warning = FALSE}
+
+# Genes with nearby peaks
+genes_with_peaks_mouse <- unique(peaks_near_genes_mouse$gene_id)
+
+# All genes from annotation
+all_genes_mouse <- unique(gencode_genes_mouse$gene_id)
+
+# Genes without nearby peaks
+genes_without_peaks_mouse <- setdiff(all_genes_mouse, genes_with_peaks_mouse)
+```
+
+#### Next, load the TPM (normalized counts) for mouse and isolate 0h samples:
+TPM normalizes for gene length and for sequencing depth, so this is better for comparing gene expression.
+I will use 0h baseline control samples since dox exposure is not relevant to our current question.
+```{r load mouse TPM files, echo = TRUE, message = FALSE, warning = FALSE}
+# Load TPM matrix (from Salmon output)
+TPM_mouse <- read.table("/scratch/Shares/rinnclass/MASTER_CLASS/STUDENTS/eroc4824/MASTER_CLASS/lessons/04_RNAseq_Dox/01_Mouse_dox_wt/dox_long/dox_long_out/star_salmon/salmon.merged.gene_tpm.tsv", 
+                        header = TRUE, row.names = 1)
+
+# Remove gene_name column
+TPM_mouse <- TPM_mouse[, -1]
+
+# Filter for 0h samples only
+tpm_mouse_0h <- TPM_mouse[, grepl("WT_0_", colnames(TPM_mouse))]
+
+# Find average expression for each gene (across 0h replicates)
+avg_0_expr_mouse <- rowMeans(tpm_mouse_0h)
+```
+
+#### Build a data frame with mouse gene ID and expression:
+```{r create df with expression values, echo = TRUE, message = FALSE, warning = FALSE}
+# Create a data frame of gene_id and expression
+mouse_tpm_peak_annotated <- data.frame(
+  gene_id = names(avg_0_expr_mouse),
+  avg_expr = avg_0_expr_mouse
+)
+
+# Label genes as 'With Peak' or 'Without Peak'
+mouse_tpm_peak_annotated$group <- ifelse(mouse_tpm_peak_annotated$gene_id %in% genes_with_peaks_mouse, 
+                              "With Peak", 
+                              ifelse(mouse_tpm_peak_annotated$gene_id %in% genes_without_peaks_mouse, 
+                                     "Without Peak", NA))
+
+# Drop NAs (genes not found in either group)
+mouse_tpm_peak_annotated <- mouse_tpm_peak_annotated[!is.na(mouse_tpm_peak_annotated$group), ]
+```
+
+#### Visualize the expression differences
+```{r visualize the mouose expression differences, echo = TRUE, message = FALSE, warning = FALSE}
+library(ggplot2)
+
+ggplot(mouse_tpm_peak_annotated, aes(x = group, y = avg_expr)) +
+  geom_violin(fill = "skyblue") +
+  geom_boxplot(width = 0.1, outlier.shape = NA) +
+  scale_y_log10() +
+  labs(title = "Gene Expression (TPM) With vs. Without Nearby Peaks (Mouse)",
+       x = "", y = "Average TPM (log10)") +
+  theme_minimal()
+```
+
+#### Test statistical difference
+```{r test statistical difference for mouse, echo = TRUE, message = FALSE, warning = FALSE}
+
+with_peak_expr_mouse <- mouse_tpm_peak_annotated %>% filter(group == "With Peak") %>% pull(avg_expr)
+without_peak_expr_mouse <- mouse_tpm_peak_annotated %>% filter(group == "Without Peak") %>% pull(avg_expr)
+
+wilcox.test(with_peak_expr_mouse, without_peak_expr_mouse)
+```
+
+#### Result for the wilcox rank sum test - W = 602207570, p-value < 2.2e-16
+This means that the mouse genes with a nearby peak are significantly more expressed than genes that are not near a peak.
+
+
+#### Now do the same for human - 
+
+#### Define human gene lists with or without a nearby peak:
+```{r create gene lists to identy near-peak vs no-peak human genes, echo = TRUE, message = FALSE, warning = FALSE}
+
+# Genes with a peak nearby (from TSS region overlap)
+genes_with_peaks_human <- unique(peaks_near_genes_human$gene_id)
+
+# All annotated genes
+all_genes_human <- unique(gencode_genes_human$gene_id)
+
+# Genes without nearby peaks
+genes_without_peaks_human <- setdiff(all_genes_human, genes_with_peaks_human)
+```
+
+#### Load human TPM and isolate 0h samples:
+```{r load human TPM, echo = TRUE, message = FALSE, warning = FALSE}
+
+# Load TPM matrix (from human Salmon output)
+TPM_human <- read.table("/scratch/Shares/rinnclass/MASTER_CLASS/DATA/human_rnaseq/salmon.merged.gene_tpm.tsv", 
+                        header = TRUE, row.names = 1)
+
+# Drop gene_name column
+TPM_human <- TPM_human[, -1]
+
+# Keep only 0h samples
+tpm_human_0h <- TPM_human[, grepl("gfp_0_", colnames(TPM_human))]
+
+# calculate avg TPM value for 0h
+avg_0_expr_human <- rowMeans(tpm_human_0h)
+```
+
+#### Build a data frame with human gene ID and expression:
+```{r build df with avg expression values, echo = TRUE, message = FALSE, warning = FALSE}
+
+human_tpm_peak_annotated <- data.frame(
+  gene_id = names(avg_0_expr_human),
+  avg_expr = avg_0_expr_human)
+
+human_tpm_peak_annotated$group <- ifelse(human_tpm_peak_annotated$gene_id %in% genes_with_peaks_human, "With Peak", ifelse(human_tpm_peak_annotated$gene_id %in% genes_without_peaks_human, "Without Peak", NA))
+
+# Remove NAs (genes not in either group)
+human_tpm_peak_annotated <- human_tpm_peak_annotated[!is.na(human_tpm_peak_annotated$group), ]
+```
+
+#### visualize the human expression differences
+```{r visualize the human expression differences, echo = TRUE, message = FALSE, warning = FALSE}
+
+ggplot(human_tpm_peak_annotated, aes(x = group, y = avg_expr)) +
+  geom_violin(fill = "lightcoral") +
+  geom_boxplot(width = 0.1, outlier.shape = NA) +
+  scale_y_log10() +
+  labs(title = "Gene Expression (TPM) With vs. Without Nearby Peaks (Human)",
+       x = "", y = "Average TPM (log10)") +
+  theme_minimal()
+```
+
+#### Test statistical difference
+```{r test statistical difference for human, echo = TRUE, message = FALSE, warning = FALSE}
+
+table(human_tpm_peak_annotated$group)
+
+
+with_peak_expr_human <- human_tpm_peak_annotated %>% filter(group == "With Peak") %>% pull(avg_expr)
+without_peak_expr_human <- human_tpm_peak_annotated %>% filter(group == "Without Peak") %>% pull(avg_expr)
+
+wilcox.test(with_peak_expr_human, without_peak_expr_human)
+```
+
+#### Result from the wilxox rank sum test - W = 705406301, p-value < 2.2e-16
+This means that the human genes with a nearby peak are significantly more expressed than genes that are not near a peak. So this holds true for human genes, and mouse genes. Next we'll ask: Are genes with a nearby peak that also show higher expression conserved between mouse and human? Let's look at the overlap of these gene lists.
+
+#### (3) Identify genes that are both 1) expressed more highly near ATAC peaks and 2) Conserved between mouse and human
+
+#### Load orthologs:
+```{r load pre-made ortholog list, echo = TRUE, message = FALSE, warning = FALSE}
+orthologs_filtered <- read.csv("/scratch/Shares/rinnclass/MASTER_CLASS/STUDENTS/eroc4824/MASTER_CLASS/lessons/08_ATACseq_pipeline/eroc4824_FINAL_PROJECT/results/mouse_human_orthologs.csv")
+
+# Remove version numbers from orthologs
+orthologs_filtered <- orthologs_filtered %>%
+  mutate(mouse_gene_id = sub("\\..*", "", mouse_gene_id),
+         human_gene_id = sub("\\..*", "", human_gene_id))
+
+# Remove version numbers from mouse
+mouse_tpm_peak_annotated <- mouse_tpm_peak_annotated %>%
+  mutate(gene_id = sub("\\..*", "", gene_id))
+rownames(mouse_tpm_peak_annotated) <- mouse_tpm_peak_annotated$gene_id
+
+# Remove version numbers from human
+human_tpm_peak_annotated <- human_tpm_peak_annotated %>%
+  mutate(gene_id = sub("\\..*", "", gene_id)) %>%
+  distinct(gene_id, .keep_all = TRUE)
+rownames(human_tpm_peak_annotated) <- human_tpm_peak_annotated$gene_id
+
+# Only keep orthologs where the gene is present in both mouse and human
+orthologs_filtered_expr <- orthologs_filtered %>%
+  filter(mouse_gene_id %in% mouse_tpm_peak_annotated$gene_id &
+         human_gene_id %in% human_tpm_peak_annotated$gene_id)
+
+# Merge mouse expression (TPM) + orthologs
+mouse_merged <- merge(orthologs_filtered_expr, mouse_tpm_peak_annotated,
+                      by.x = "mouse_gene_id", by.y = "gene_id")
+
+# Merge human expression to create a df with merged mouse-human orthologs and peak-proximity & TPM info:
+combined_df <- merge(mouse_merged, human_tpm_peak_annotated,
+                     by.x = "human_gene_id", by.y = "gene_id",
+                     suffixes = c("_mouse", "_human"))
+```
+
+
+#### Subset the "high expression with nearby peaks" conserved genes:
+Now we are creating a data frame with genes that:
+(1) Have a nearby accessible peak
+(2) Have higher than average expression
+(3) Is an ortholog present in both human and mouse
+```{r filter for highly expressed genes, echo = TRUE, message = FALSE, warning = FALSE}
+
+# Create df of conserved highly-expressed-near-peaks genes:
+# Also ignores "NA"s
+conserved_peak_expr_genes <- combined_df %>%
+  filter(group_mouse == "With Peak", group_human == "With Peak") %>%
+  filter(avg_expr_mouse > median(mouse_tpm_peak_annotated$avg_expr, na.rm = TRUE),
+         avg_expr_human > median(human_tpm_peak_annotated$avg_expr, na.rm = TRUE))
+
+# How many conserved genes?
+cat("Number of conserved genes with nearby peaks and high expression:", nrow(conserved_peak_expr_genes), "\n")
+
+# Preview the conserved genes
+kable(head(conserved_peak_expr_genes), caption = "Conserved genes with nearby peaks and high expression")
+
+# Save results in a table:
+write.csv(conserved_peak_expr_genes, "/scratch/Shares/rinnclass/MASTER_CLASS/STUDENTS/eroc4824/MASTER_CLASS/lessons/08_ATACseq_pipeline/eroc4824_FINAL_PROJECT/results/conserved_peak_nearby_high_expr_genes.csv", row.names = FALSE)
+
+```
+
+#### Now visualize the mouse and human data together in a violin plot:
+This will give a nice comparison to see if both species have a conserved pattern with higher expression of genes that are near peaks.
+```{r visualize mouse and human expression differences together, echo = TRUE, message = FALSE, warning = FALSE}
+
+# Add species label to each dataset
+mouse_tpm_peak_annotated$species <- "Mouse"
+human_tpm_peak_annotated$species <- "Human"
+
+# combine the two data frames
+all_tpm_peak_annotated <- bind_rows(mouse_tpm_peak_annotated, human_tpm_peak_annotated)
+
+# create a summary table with counts (we'll use this to label number of genes)
+group_counts <- all_tpm_peak_annotated %>%
+  group_by(species, group) %>%
+  summarise(n = n(), .groups = "drop")
+
+# and plot:
+ggplot(all_tpm_peak_annotated, aes(x = group, y = avg_expr, fill = species)) +
+  geom_violin(position = position_dodge(width = 0.9), alpha = 0.6) +
+  geom_boxplot(width = 0.1, position = position_dodge(width = 0.9), outlier.shape = NA) +
+  scale_y_log10() +
+  labs(title = "Gene Expression With vs. Without Nearby ATAC Peaks",
+       x = "Peak Proximity", y = "Average TPM (log10)") +
+  theme_minimal() +
+  scale_fill_manual(values = c("Mouse" = "skyblue", "Human" = "lightcoral")) +
+  geom_text(data = group_counts,
+            aes(x = group, y = 2000, label = paste0("n = ", n), group = species),
+            position = position_dodge(width = 0.9),
+            size = 4, vjust = -0.5)
+```
+#### The trend is the same for each species, and this is statistically significant.
+
+#### Result - there are 11,084 human and mouse orthologs that are expressed more highly when they have a nearby accessible peak (within 5kb of the gene's TSS). 
+- This tells us that genes with nearby accessible chromatin regions tend to be more highly expressed, and this pattern is strongly conserved between mouse and human embryonic stem cells.
+- This also supports a really important concept for gene regulation that promoter and enhancer accessibility is really important for transcriptional activation, and this relationship is evolutionarily conserved.
+
+#### Future directions:
+- Explore what these genes are - gene ontology, pathway enrichment analysis
+- Explore the composition of these accessible peaks (i.e. promoters vs enhancers)
+- Explore at what point during differentiation these peaks become inaccessible. Which of these will change and which will remain accessible (i.e. housekeeping genes)?
